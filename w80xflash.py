@@ -642,8 +642,9 @@ class SerLoader(object):
         self.com = serial.Serial(port, 115200, timeout=timeout)
         self.download_baudrate = baudrate
 
-    def reset(self, action='rts'):
+    def reboot(self, action='RTS'):
         """reboot device"""
+        self.log.debug('reboot with %s' % action)
         self.com.rts = True
         time.sleep(0.5)
         self.com.rts = False
@@ -652,12 +653,13 @@ class SerLoader(object):
         """wait 'C'"""
         dat = self.com.read(self.com.in_waiting or 1).decode('ascii','ignore')
         if dat[-1] != 'C':
-            self.log.error('sync timeout\n')
+            self.log.error('sync error\n')
             return False
         return dat
 
     def goto_secboot(self):
         """goto secboot"""
+        self.log.debug('goto secboot with ESC')
         for k in range(10):
             self.putc(b'\x1B')
             time.sleep(0.01)
@@ -685,7 +687,7 @@ class SerLoader(object):
             '2M': b'\x21\x0a\x00\xc3\x35\x32\x00\x00\x00\x02\x00\xfe\x01'
         }
         if size in CMD:
-            self.reset()
+            self.reboot()
             ack = self.goto_secboot()
             if ack:
                 self.log.info('sync: %s' % ack)
@@ -696,7 +698,7 @@ class SerLoader(object):
     def download(self, fls):
         """flash device"""
         self.log.info('download: %s' % fls)
-        self.reset()
+        self.reboot()
         ack = self.goto_secboot()
         if ack:
             self.log.info('sync: %s' % ack)
@@ -751,12 +753,17 @@ def main():
         "-e", "--erase",
         metavar="SIZE",
         help="erase flash, size: 1M,2M",
-        default='1M')
+        default=None)
     group.add_argument(
         "-d", "--download",
         metavar="FILE",
         help="firmware to be download",
         default=None)
+    group.add_argument(
+        "-r", "--reboot",
+        action="store_true",
+        help="reboot to run",
+        default=False)
 
     args = parser.parse_args()
 
@@ -768,6 +775,8 @@ def main():
         sl.erase(args.erase)
     if args.download:
         sl.download(args.download)
+    if args.reboot:
+        sl.reboot()
 
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO)
