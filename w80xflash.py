@@ -106,6 +106,8 @@ YMODEM Batch Transmission Session (1 file)
 
 
 '''
+from __future__ import division, print_function
+
 __author__ = 'Wijnand Modderman <maze@pyth0n.org>'
 __copyright__ = ['Copyright (c) 2010 Wijnand Modderman',
                  'Copyright (c) 1981 Chuck Forsberg']
@@ -206,7 +208,7 @@ class XMODEM(object):
         self.pad = pad
         self.log = logging.getLogger('xmodem')
 
-    def abort(self, count=2, timeout=60):
+    def abort(self, count=2, timeout=10):
         '''
         Send an abort sequence using CAN bytes.
 
@@ -218,7 +220,7 @@ class XMODEM(object):
         for _ in range(count):
             self.putc(CAN, timeout)
 
-    def send(self, stream, retry=16, timeout=60, quiet=False, callback=None):
+    def send(self, stream, retry=16, timeout=10, quiet=False, callback=None):
         '''
         Send a stream via the XMODEM protocol.
 
@@ -384,7 +386,7 @@ class XMODEM(object):
             _bytes.append(crc)
         return bytearray(_bytes)
 
-    def recv(self, stream, crc_mode=1, retry=16, timeout=60, delay=1, quiet=0):
+    def recv(self, stream, crc_mode=1, retry=16, timeout=10, delay=1, quiet=0):
         '''
         Receive a stream via the XMODEM protocol.
 
@@ -632,13 +634,13 @@ XMODEM1k = partial(XMODEM, mode='xmodem1k')
 '''
 import sys, serial, time
 import logging
-from xmodem import XMODEM1k
 
 
 class SerLoader(object):
-    def __init__(self, port, baud, timeout=None):
-        self.com = serial.Serial(port, baud, timeout=timeout)
+    def __init__(self, port, baudrate, timeout=None):
         self.log = logging.getLogger('w80xflash')
+        self.com = serial.Serial(port, 115200, timeout=timeout)
+        self.download_baudrate = baudrate
 
     def reset(self, action='rts'):
         """reboot device"""
@@ -647,33 +649,65 @@ class SerLoader(object):
         self.com.rts = False
 
     def sync(self):
-        """sync serial"""
+        """wait 'C'"""
+        dat = self.com.read(self.com.in_waiting or 1).decode('ascii','ignore')
+        if dat[-1] != 'C':
+            self.log.error('sync timeout\n')
+            return False
+        return dat
+
+    def goto_secboot(self):
+        """goto secboot"""
         for k in range(10):
             self.putc(b'\x1B')
             time.sleep(0.01)
-        dat = self.com.read(self.com.in_waiting).decode('ascii')
-        if dat[-1] != 'C':
-            sys.stderr.write('serial sync timeout\n')
-            return False
-        return dat.replace('C','')
+        time.sleep(0.5)
+        return self.sync()
 
-    def erase(self):
+    def set_baudrate(self, baudrate):
+        """set baudrate in rom"""
+        CMD = {
+            'b921600':b'\x21\x0a\x00\x5d\x50\x31\x00\x00\x00\x00\x10\x0e\x00',
+            'b115200':b'\x21\x0a\x00\x5d\x50\x31\x00\x00\x00\x00\x10\x0e\x00',
+        }
+        if self.com.baudrate != int(baudrate) and 'b%s'%baudrate in CMD:
+            self.putc(CMD.get('b%s'%baudrate))
+            time.sleep(0.5) # wait send out
+            self.com.baudrate = baudrate
+            time.sleep(0.5) # wait baudrate switch
+            return self.sync()
+
+    def erase(self, size):
         """erase device"""
-        self.log.info('erase all')
+        self.log.info('erase %s' % size)
+        CMD = {
+            '1M': b'\x21\x0a\x00\xe2\x25\x32\x00\x00\x00\x02\x00\xfe\x00',
+            '2M': b'\x21\x0a\x00\xc3\x35\x32\x00\x00\x00\x02\x00\xfe\x01'
+        }
+        if size in CMD:
+            self.reset()
+            ack = self.goto_secboot()
+            if ack:
+                self.log.info('sync: %s' % ack)
+                self.putc(CMD.get(size))
+                self.com.reset_input_buffer()
+                self.log.info('erase result: %s' % (self.sync() and 'succ' or 'fail'))
 
     def download(self, fls):
         """flash device"""
         self.log.info('download: %s' % fls)
         self.reset()
-        ack = self.sync()
-        self.log.info('sync: %s' % ack)
+        ack = self.goto_secboot()
         if ack:
+            self.log.info('sync: %s' % ack)
             xmodem = XMODEM1k(self.getc,self.putc)
             with open(fls, 'rb') as stream:
+                if self.set_baudrate(self.download_baudrate):
+                    self.log.info('set baudrate: %s' % self.download_baudrate)
                 self.com.reset_input_buffer()
-                xmodem.send(stream, callback=self.dlcb)
+                xmodem.send(stream, callback=self.download_cb)
 
-    def dlcb(self, total, succ, err):
+    def download_cb(self, total, succ, err):
         wmax = 40
         w = total>wmax and wmax or (total or 1)
         p = int((total+w-1)/w)
@@ -707,17 +741,17 @@ def main():
         help="serial port name",
         default=None)
     group.add_argument(
-        "-b", "--baud",
+        "-b", "--baudrate",
         metavar="PORT",
-        help="set baud rate, default: %(default)s",
+        help="set baudrate, default: %(default)s",
         default='921600')
 
     group = parser.add_argument_group("flash handling")
     group.add_argument(
         "-e", "--erase",
-        action="store_true",
-        help="erase all areas",
-        default=False)
+        metavar="SIZE",
+        help="erase flash, size: 1M,2M",
+        default='1M')
     group.add_argument(
         "-d", "--download",
         metavar="FILE",
@@ -729,9 +763,9 @@ def main():
     if args.port is None:
         parser.error('port is not given')
 
-    sl = SerLoader(args.port, args.baud)
+    sl = SerLoader(args.port, args.baudrate)
     if args.erase:
-        sl.erase()
+        sl.erase(args.erase)
     if args.download:
         sl.download(args.download)
 
