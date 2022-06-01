@@ -632,6 +632,10 @@ XMODEM1k = partial(XMODEM, mode='xmodem1k')
  w80x flash module
 ===============================
 '''
+
+__author__ = 'Kicer Jiao <kicer@foresh.com>'
+__version__ = '0.9.2'
+
 import sys, serial, time
 import logging
 
